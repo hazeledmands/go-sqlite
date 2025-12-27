@@ -27,21 +27,21 @@
 //
 //	OS      Arch    SQLite version
 //	------------------------------
-//	darwin	amd64   3.51.1
-//	darwin	arm64   3.51.1
-//	freebsd	amd64   3.51.1
-//	freebsd	arm64   3.51.1
-//	linux	386     3.51.1
-//	linux	amd64   3.51.1
-//	linux	arm     3.51.1
-//	linux	arm64   3.51.1
-//	linux	loong64 3.51.1
-//	linux	ppc64le 3.51.1
-//	linux	riscv64 3.51.1
-//	linux	s390x   3.51.1
-//	windows	386     3.51.1
-//	windows	amd64   3.51.1
-//	windows	arm64   3.51.1
+//	darwin	amd64   3.50.4
+//	darwin	arm64   3.50.4
+//	freebsd	amd64   3.50.4
+//	freebsd	arm64   3.50.4
+//	linux	386     3.50.4
+//	linux	amd64   3.50.4
+//	linux	arm     3.50.4
+//	linux	arm64   3.50.4
+//	linux	loong64 3.50.4
+//	linux	ppc64le 3.50.4
+//	linux	riscv64 3.50.4
+//	linux	s390x   3.50.4
+//	windows	386     3.50.4
+//	windows	amd64   3.50.4
+//	windows	arm64   3.50.4
 //
 // # Benchmarks
 //
@@ -54,11 +54,6 @@
 // https://modern-c.appspot.com/-/builder/?importpath=modernc.org%2fsqlite
 //
 // # Changelog
-//
-//   - 2025-12-27 v1.42.0: 1) Upgrade to SQLite 3.51.1. 2) OpendBSD is not a supported
-//     target for a long time, even though an old SQLite version is still included
-//     in this repository, which at least was able to build on OpenBSD. With this release it
-//     no more does. Help wanted.
 //
 //   - 2025-10-10 v1.39.1: Upgrade to SQLite 3.50.4.
 //

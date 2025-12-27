@@ -31,3 +31,5 @@ retract v1.29.4 // tagged accidentally w/o builders checking the commit
 retract v1.33.0 // intended to resolve #177 but breaks clients
 
 retract v1.34.3 // intended to resolve #199 but breaks clients, see #200, fix in 1fcc86e9
+
+retract v1.42.0 // Accidentaly broken, reverting to v1.41.0 state
