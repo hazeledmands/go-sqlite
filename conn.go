@@ -35,6 +35,7 @@ type conn struct {
 
 func newConn(dsn string) (*conn, error) {
 	var query, vfsName string
+	var cipherConfig *sqlcipherConfig
 
 	// Parse the query parameters from the dsn and them from the dsn if not prefixed by file:
 	// https://github.com/mattn/go-sqlite3/blob/3392062c729d77820afc1f5cae3427f0de39e954/sqlite3.go#L1046
@@ -46,6 +47,19 @@ func newConn(dsn string) (*conn, error) {
 		vfsName, err = getVFSName(query)
 		if err != nil {
 			return nil, err
+		}
+		cipherConfig, err = parseSQLCipherConfig(query)
+		if err != nil {
+			return nil, err
+		}
+		if cipherConfig != nil {
+			if vfsName != "" {
+				return nil, fmt.Errorf("sqlcipher cannot be combined with a custom vfs")
+			}
+			vfsName, err = sqlcipherRegisterVFS(cipherConfig)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		if !strings.HasPrefix(dsn, "file:") {
@@ -67,6 +81,10 @@ func newConn(dsn string) (*conn, error) {
 
 	c.db = db
 	if err = c.extendedResultCodes(true); err != nil {
+		c.Close()
+		return nil, err
+	}
+	if err = configureSQLCipher(c, cipherConfig); err != nil {
 		c.Close()
 		return nil, err
 	}

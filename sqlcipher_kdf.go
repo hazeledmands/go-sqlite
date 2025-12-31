@@ -1,0 +1,55 @@
+// Copyright 2025 The Sqlite Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package sqlite // import "modernc.org/sqlite"
+
+import (
+	"crypto/hmac"
+	"hash"
+)
+
+func sqlcipherDeriveKeys(cfg *sqlcipherConfig, salt []byte) ([]byte, []byte) {
+	encKey := pbkdf2Key(cfg.key, salt, cfg.kdfIter, 32, cfg.hmacHash)
+	hmacLen := 0
+	if cfg.hmac {
+		hmacLen = cfg.hmacSize()
+	}
+	hmacKey := pbkdf2Key(cfg.key, salt, cfg.fastKDFIter, hmacLen, cfg.hmacHash)
+	return encKey, hmacKey
+}
+
+func pbkdf2Key(password, salt []byte, iter, keyLen int, h func() hash.Hash) []byte {
+	if keyLen == 0 {
+		return nil
+	}
+	prf := func(key, data []byte) []byte {
+		mac := hmac.New(h, key)
+		mac.Write(data)
+		return mac.Sum(nil)
+	}
+	hashLen := h().Size()
+	numBlocks := (keyLen + hashLen - 1) / hashLen
+	var dk []byte
+	var blockBuf [4]byte
+	for block := 1; block <= numBlocks; block++ {
+		blockBuf[0] = byte(block >> 24)
+		blockBuf[1] = byte(block >> 16)
+		blockBuf[2] = byte(block >> 8)
+		blockBuf[3] = byte(block)
+		data := make([]byte, 0, len(salt)+4)
+		data = append(data, salt...)
+		data = append(data, blockBuf[:]...)
+		u := prf(password, data)
+		t := make([]byte, len(u))
+		copy(t, u)
+		for i := 1; i < iter; i++ {
+			u = prf(password, u)
+			for x := range t {
+				t[x] ^= u[x]
+			}
+		}
+		dk = append(dk, t...)
+	}
+	return dk[:keyLen]
+}
