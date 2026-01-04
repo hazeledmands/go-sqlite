@@ -236,16 +236,22 @@ var sqlcipherIOMethods = sqlite3.Tsqlite3_io_methods{
 }
 
 func newSQLCipherFileState(cfg *sqlcipherConfig, baseFile uintptr) *sqlcipherFileState {
-	// Always calculate reserved size based on HMAC algorithm, even if HMAC verification is disabled.
-	// This ensures correct page layout when reading databases that have HMAC but we don't verify it.
-	hmacSize := cfg.hmacSize()
-	reserved := 16 + hmacSize // IV + HMAC space
+	reserved := 16 // IV only
+	hmacSize := 0
+	if cfg.hmac {
+		hmacSize = cfg.hmacSize()
+		reserved += hmacSize // IV + HMAC space
+		// Round to next multiple of 16 (AES block size) per SQLCipher spec
+		if reserved%16 != 0 {
+			reserved = (reserved/16 + 1) * 16
+		}
+	}
 	return &sqlcipherFileState{
 		config:      cfg,
 		baseFile:    baseFile,
 		pageSize:    cfg.pageSize,
 		reserved:    reserved,
-		useHMAC:     cfg.hmac, // Controls verification, not layout
+		useHMAC:     cfg.hmac,
 		hmacSize:    hmacSize,
 		plainHeader: cfg.plaintextHeader,
 	}
@@ -524,20 +530,20 @@ func (s *sqlcipherFileState) ensureKeys(tls *libc.TLS) error {
 			}
 			s.hasSalt = true
 		} else {
-		buf := make([]byte, sqlcipherSaltSize)
-		rc := sqlcipherCallRead(tls, s.baseFile, buf, 0)
-		if rc == sqlite3.SQLITE_OK && len(buf) == sqlcipherSaltSize {
-			copy(s.salt[:], buf)
-			s.hasSalt = true
-		} else {
-			if _, err := rand.Read(s.salt[:]); err != nil {
-				return err
+			buf := make([]byte, sqlcipherSaltSize)
+			rc := sqlcipherCallRead(tls, s.baseFile, buf, 0)
+			if rc == sqlite3.SQLITE_OK && len(buf) == sqlcipherSaltSize {
+				copy(s.salt[:], buf)
+				s.hasSalt = true
+			} else {
+				if _, err := rand.Read(s.salt[:]); err != nil {
+					return err
+				}
+				s.hasSalt = true
+				_, _ = rand.Read(buf)
+				copy(buf, s.salt[:])
+				_ = sqlcipherCallWrite(tls, s.baseFile, buf, 0)
 			}
-			s.hasSalt = true
-			_, _ = rand.Read(buf)
-			copy(buf, s.salt[:])
-			_ = sqlcipherCallWrite(tls, s.baseFile, buf, 0)
-		}
 		}
 	}
 	encKey, hmacKey := sqlcipherDeriveKeys(s.config, s.salt[:])
@@ -560,10 +566,6 @@ func (s *sqlcipherFileState) decryptPage(pageNo int, data []byte) ([]byte, error
 			copy(s.salt[:], data[:sqlcipherSaltSize])
 			s.hasSalt = true
 		}
-		copy(plain[:plainHeader], []byte("SQLite format 3\x00")[:plainHeader])
-		if len(plain) > 20 {
-			plain[20] = byte(s.reserved)
-		}
 	}
 	ivOffset := s.pageSize - s.reserved
 	iv := data[ivOffset : ivOffset+aes.BlockSize]
@@ -583,6 +585,13 @@ func (s *sqlcipherFileState) decryptPage(pageNo int, data []byte) ([]byte, error
 	}
 	mode := cipher.NewCBCDecrypter(block, iv)
 	mode.CryptBlocks(plain[plainHeader:ivOffset], ciphertext)
+	// Set SQLite header and reserved bytes AFTER decryption
+	if pageNo == 1 {
+		copy(plain[:plainHeader], []byte("SQLite format 3\x00")[:plainHeader])
+		if len(plain) > 20 {
+			plain[20] = byte(s.reserved)
+		}
+	}
 	return plain, nil
 }
 

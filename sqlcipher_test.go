@@ -67,6 +67,61 @@ func TestSQLCipherCreateNewDatabase(t *testing.T) {
 	}
 }
 
+func TestSQLCipherCreateNewDatabaseNoHMAC(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_encrypted_nohmac.db")
+
+	dsn := dbPath + "?_sqlcipher_key=testpassword&_sqlcipher_hmac=false"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("Failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		t.Fatalf("Failed to ping new encrypted database: %v", err)
+	}
+
+	// Create a table
+	_, err = db.Exec("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+	if err != nil {
+		t.Fatalf("Failed to create table: %v", err)
+	}
+
+	// Insert data
+	_, err = db.Exec("INSERT INTO test (name) VALUES (?)", "alice")
+	if err != nil {
+		t.Fatalf("Failed to insert data: %v", err)
+	}
+
+	// Read it back
+	var name string
+	err = db.QueryRow("SELECT name FROM test WHERE id = 1").Scan(&name)
+	if err != nil {
+		t.Fatalf("Failed to read data: %v", err)
+	}
+	if name != "alice" {
+		t.Fatalf("Expected 'alice', got '%s'", name)
+	}
+
+	db.Close()
+
+	// Reopen and verify persistence
+	db2, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("Failed to reopen database: %v", err)
+	}
+	defer db2.Close()
+
+	err = db2.QueryRow("SELECT name FROM test WHERE id = 1").Scan(&name)
+	if err != nil {
+		t.Fatalf("Failed to read data after reopen: %v", err)
+	}
+	if name != "alice" {
+		t.Fatalf("Expected 'alice' after reopen, got '%s'", name)
+	}
+}
+
 func TestSQLCipherReadExistingDatabase(t *testing.T) {
 	// This test requires an existing encrypted database
 	// Skip if the test database doesn't exist
@@ -104,7 +159,7 @@ func TestSQLCipherReadExistingDatabase(t *testing.T) {
 		t.Skip("Database file not found: " + dbpath)
 	}
 
-	dsn := dbpath + "?_sqlcipher_key=" + dbkey + "&_sqlcipher_hmac=false"
+	dsn := dbpath + "?_sqlcipher_key=" + dbkey
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("Failed to open database: %v", err)

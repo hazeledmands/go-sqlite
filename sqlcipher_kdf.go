@@ -11,27 +11,29 @@ import (
 
 func sqlcipherDeriveKeys(cfg *sqlcipherConfig, salt []byte) ([]byte, []byte) {
 	var encKey []byte
-	var hmacKey []byte
 
 	if cfg.keyIsRaw {
 		// Raw key mode: use the key directly as encryption key
 		encKey = make([]byte, 32)
 		copy(encKey, cfg.key)
-
-		// HMAC key is derived using HMAC of the encryption key with salt
-		if cfg.hmac {
-			h := hmac.New(cfg.hmacHash(), encKey)
-			h.Write(salt)
-			hmacKey = h.Sum(nil)[:cfg.hmacSize()]
-		}
 	} else {
-		// Passphrase mode: derive keys using PBKDF2
+		// Passphrase mode: derive encryption key using PBKDF2
 		encKey = pbkdf2Key(cfg.key, salt, cfg.kdfIter, 32, cfg.hmacHash())
-		hmacLen := 0
-		if cfg.hmac {
-			hmacLen = cfg.hmacSize()
+	}
+
+	var hmacKey []byte
+	if cfg.hmac {
+		// Create masked salt for HMAC key derivation.
+		// XOR each byte with the mask to ensure the HMAC key derivation
+		// uses a different salt than the encryption key derivation.
+		hmacSalt := make([]byte, len(salt))
+		for i := range salt {
+			hmacSalt[i] = salt[i] ^ sqlcipherHMACSaltMask
 		}
-		hmacKey = pbkdf2Key(cfg.key, salt, cfg.fastKDFIter, hmacLen, cfg.hmacHash())
+		// Derive HMAC key using the encryption key as the PBKDF2 password.
+		// HMAC key length is always 32 bytes (same as encryption key), not the hash output size.
+		// This matches real SQLCipher behavior (KEYLENGTH_SQLCIPHER = 32).
+		hmacKey = pbkdf2Key(encKey, hmacSalt, cfg.fastKDFIter, 32, cfg.hmacHash())
 	}
 
 	return encKey, hmacKey

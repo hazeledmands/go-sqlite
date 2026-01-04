@@ -6,6 +6,7 @@ package sqlite // import "modernc.org/sqlite"
 
 import (
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
 	"database/sql/driver"
@@ -31,6 +32,9 @@ const (
 	sqlcipherDefaultHMACAlg     = "sha512"
 	// sqlcipherSaltSize is 16 bytes as used by SQLCipher.
 	sqlcipherSaltSize = 16
+	// sqlcipherHMACSaltMask is XOR'd with each byte of the salt when deriving
+	// the HMAC key, ensuring it differs from the encryption key derivation salt.
+	sqlcipherHMACSaltMask = 0x3a
 )
 
 type sqlcipherConfig struct {
@@ -60,8 +64,8 @@ func (c *sqlcipherConfig) validate() error {
 	if c.plaintextHeader != 0 {
 		return fmt.Errorf("sqlcipher plaintext_header_size is not supported in this build")
 	}
-	if c.hmacAlgorithm != "sha256" && c.hmacAlgorithm != "sha512" {
-		return fmt.Errorf("sqlcipher hmac_algorithm must be sha256 or sha512")
+	if c.hmacAlgorithm != "sha1" && c.hmacAlgorithm != "sha256" && c.hmacAlgorithm != "sha512" {
+		return fmt.Errorf("sqlcipher hmac_algorithm must be sha1, sha256, or sha512")
 	}
 	return nil
 }
@@ -158,17 +162,25 @@ func (c *sqlcipherConfig) signature() string {
 }
 
 func (c *sqlcipherConfig) hmacHash() func() hash.Hash {
-	if c.hmacAlgorithm == "sha256" {
+	switch c.hmacAlgorithm {
+	case "sha1":
+		return sha1.New
+	case "sha256":
 		return sha256.New
+	default:
+		return sha512.New
 	}
-	return sha512.New
 }
 
 func (c *sqlcipherConfig) hmacSize() int {
-	if c.hmacAlgorithm == "sha256" {
+	switch c.hmacAlgorithm {
+	case "sha1":
+		return sha1.Size
+	case "sha256":
 		return sha256.Size
+	default:
+		return sha512.Size
 	}
-	return sha512.Size
 }
 
 func configureSQLCipher(c *conn, cfg *sqlcipherConfig) error {
@@ -178,6 +190,10 @@ func configureSQLCipher(c *conn, cfg *sqlcipherConfig) error {
 	reserved := 16
 	if cfg.hmac {
 		reserved += cfg.hmacSize()
+		// Round to next multiple of 16 (AES block size) per SQLCipher spec
+		if reserved%16 != 0 {
+			reserved = (reserved/16 + 1) * 16
+		}
 	}
 	dbName, err := libc.CString("main")
 	if err != nil {
