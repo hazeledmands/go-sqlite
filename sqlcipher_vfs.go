@@ -364,30 +364,49 @@ func sqlcipherReadRange(tls *libc.TLS, state *sqlcipherFileState, buf []byte, of
 	if err := state.ensureKeys(tls); err != nil {
 		return sqlite3.SQLITE_IOERR_READ
 	}
+	var fileSize sqlite3.Sqlite3_int64
+	if rc := sqlcipherCallFileSize(tls, state.baseFile, uintptr(unsafe.Pointer(&fileSize))); rc != sqlite3.SQLITE_OK {
+		return rc
+	}
 	pageSize := int64(state.pageSize)
 	startPage := offset / pageSize
 	endPage := (offset + int64(len(buf)) - 1) / pageSize
 	writePos := 0
+	shortRead := offset+int64(len(buf)) > int64(fileSize)
+	writeZero := func(page int64, pageOffset int64) {
+		start := int64(0)
+		if page == startPage {
+			start = offset - pageOffset
+		}
+		end := pageSize
+		if page == endPage {
+			end = (offset + int64(len(buf))) - pageOffset
+		}
+		zero := make([]byte, end-start)
+		copy(buf[writePos:], zero)
+		writePos += int(end - start)
+	}
 	for page := startPage; page <= endPage; page++ {
 		pageOffset := page * pageSize
 		pageBuf := make([]byte, pageSize)
+		if int64(fileSize) <= pageOffset {
+			shortRead = true
+			writeZero(page, pageOffset)
+			continue
+		}
 		rc := sqlcipherCallRead(tls, state.baseFile, pageBuf, pageOffset)
 		if rc == sqlite3.SQLITE_IOERR_SHORT_READ {
-			plain := make([]byte, pageSize)
-			start := int64(0)
-			if page == startPage {
-				start = offset - pageOffset
-			}
-			end := pageSize
-			if page == endPage {
-				end = (offset + int64(len(buf))) - pageOffset
-			}
-			copy(buf[writePos:], plain[start:end])
-			writePos += int(end - start)
+			shortRead = true
+			writeZero(page, pageOffset)
 			continue
 		}
 		if rc != sqlite3.SQLITE_OK {
 			return rc
+		}
+		if int64(fileSize) < pageOffset+pageSize {
+			shortRead = true
+			writeZero(page, pageOffset)
+			continue
 		}
 		plain, err := state.decryptPage(int(page+1), pageBuf)
 		if err != nil {
@@ -404,6 +423,9 @@ func sqlcipherReadRange(tls *libc.TLS, state *sqlcipherFileState, buf []byte, of
 		copy(buf[writePos:], plain[start:end])
 		writePos += int(end - start)
 	}
+	if shortRead {
+		return sqlite3.SQLITE_IOERR_SHORT_READ
+	}
 	return sqlite3.SQLITE_OK
 }
 
@@ -413,10 +435,25 @@ func sqlcipherWriteRange(tls *libc.TLS, state *sqlcipherFileState, buf []byte, o
 	if err := state.ensureKeys(tls); err != nil {
 		return sqlite3.SQLITE_IOERR_WRITE
 	}
+	var fileSize sqlite3.Sqlite3_int64
+	if rc := sqlcipherCallFileSize(tls, state.baseFile, uintptr(unsafe.Pointer(&fileSize))); rc != sqlite3.SQLITE_OK {
+		return rc
+	}
 	pageSize := int64(state.pageSize)
 	startPage := offset / pageSize
 	endPage := (offset + int64(len(buf)) - 1) / pageSize
 	readPos := 0
+	if fileSize == 0 && startPage > 0 {
+		plain := make([]byte, state.pageSize)
+		encrypted, err := state.encryptPage(1, plain)
+		if err != nil {
+			return sqlite3.SQLITE_IOERR_WRITE
+		}
+		rc := sqlcipherCallWrite(tls, state.baseFile, encrypted, 0)
+		if rc != sqlite3.SQLITE_OK {
+			return rc
+		}
+	}
 	for page := startPage; page <= endPage; page++ {
 		pageOffset := page * pageSize
 		pageBuf := make([]byte, pageSize)
@@ -477,6 +514,16 @@ func (s *sqlcipherFileState) ensureKeys(tls *libc.TLS) error {
 		return nil
 	}
 	if !s.hasSalt {
+		var fileSize sqlite3.Sqlite3_int64
+		if rc := sqlcipherCallFileSize(tls, s.baseFile, uintptr(unsafe.Pointer(&fileSize))); rc != sqlite3.SQLITE_OK {
+			return errors.New("file size query failed")
+		}
+		if fileSize == 0 {
+			if _, err := rand.Read(s.salt[:]); err != nil {
+				return err
+			}
+			s.hasSalt = true
+		} else {
 		buf := make([]byte, sqlcipherSaltSize)
 		rc := sqlcipherCallRead(tls, s.baseFile, buf, 0)
 		if rc == sqlite3.SQLITE_OK && len(buf) == sqlcipherSaltSize {
@@ -490,6 +537,7 @@ func (s *sqlcipherFileState) ensureKeys(tls *libc.TLS) error {
 			_, _ = rand.Read(buf)
 			copy(buf, s.salt[:])
 			_ = sqlcipherCallWrite(tls, s.baseFile, buf, 0)
+		}
 		}
 	}
 	encKey, hmacKey := sqlcipherDeriveKeys(s.config, s.salt[:])
@@ -513,6 +561,9 @@ func (s *sqlcipherFileState) decryptPage(pageNo int, data []byte) ([]byte, error
 			s.hasSalt = true
 		}
 		copy(plain[:plainHeader], []byte("SQLite format 3\x00")[:plainHeader])
+		if len(plain) > 20 {
+			plain[20] = byte(s.reserved)
+		}
 	}
 	ivOffset := s.pageSize - s.reserved
 	iv := data[ivOffset : ivOffset+aes.BlockSize]
@@ -547,6 +598,9 @@ func (s *sqlcipherFileState) encryptPage(pageNo int, plain []byte) ([]byte, erro
 	encrypted := make([]byte, s.pageSize)
 	if pageNo == 1 {
 		copy(encrypted[:sqlcipherSaltSize], s.salt[:])
+		if len(plain) > 20 {
+			plain[20] = byte(s.reserved)
+		}
 	}
 	iv := encrypted[ivOffset : ivOffset+aes.BlockSize]
 	if _, err := rand.Read(iv); err != nil {

@@ -17,6 +17,10 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unsafe"
+
+	"modernc.org/libc"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 const (
@@ -175,6 +179,15 @@ func configureSQLCipher(c *conn, cfg *sqlcipherConfig) error {
 	if cfg.hmac {
 		reserved += cfg.hmacSize()
 	}
+	dbName, err := libc.CString("main")
+	if err != nil {
+		return err
+	}
+	rc := sqlite3.Xsqlite3_file_control(c.tls, c.db, dbName, sqlite3.SQLITE_FCNTL_RESERVE_BYTES, uintptr(unsafe.Pointer(&reserved)))
+	libc.Xfree(c.tls, dbName)
+	if rc != sqlite3.SQLITE_OK {
+		return fmt.Errorf("sqlcipher reserve bytes setup failed: %d", rc)
+	}
 	pageCount, err := queryInt(c, "pragma page_count")
 	if err != nil {
 		return err
@@ -183,9 +196,9 @@ func configureSQLCipher(c *conn, cfg *sqlcipherConfig) error {
 		if _, err := c.exec(context.Background(), fmt.Sprintf("pragma page_size=%d", cfg.pageSize), nil); err != nil {
 			return err
 		}
-		if _, err := c.exec(context.Background(), fmt.Sprintf("pragma reserved_size=%d", reserved), nil); err != nil {
-			return err
-		}
+	}
+	if _, err := c.exec(context.Background(), fmt.Sprintf("pragma reserved_size=%d", reserved), nil); err != nil {
+		return err
 	}
 	return nil
 }
