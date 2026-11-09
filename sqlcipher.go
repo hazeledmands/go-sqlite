@@ -199,7 +199,13 @@ func configureSQLCipher(c *conn, cfg *sqlcipherConfig) error {
 	if err != nil {
 		return err
 	}
-	rc := sqlite3.Xsqlite3_file_control(c.tls, c.db, dbName, sqlite3.SQLITE_FCNTL_RESERVE_BYTES, uintptr(unsafe.Pointer(&reserved)))
+	// SQLITE_FCNTL_RESERVE_BYTES takes (and writes back) a C int. It must live in
+	// C memory, not on the Go stack (see sqlcipherCallRead).
+	const cIntSize = int(unsafe.Sizeof(int32(0)))
+	pReserved := c.tls.Alloc(cIntSize)
+	*(*int32)(unsafe.Pointer(pReserved)) = int32(reserved)
+	rc := sqlite3.Xsqlite3_file_control(c.tls, c.db, dbName, sqlite3.SQLITE_FCNTL_RESERVE_BYTES, pReserved)
+	c.tls.Free(cIntSize)
 	libc.Xfree(c.tls, dbName)
 	if rc != sqlite3.SQLITE_OK {
 		return fmt.Errorf("sqlcipher reserve bytes setup failed: %d", rc)

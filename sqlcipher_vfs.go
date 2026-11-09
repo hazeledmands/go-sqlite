@@ -370,8 +370,8 @@ func sqlcipherReadRange(tls *libc.TLS, state *sqlcipherFileState, buf []byte, of
 	if err := state.ensureKeys(tls); err != nil {
 		return sqlite3.SQLITE_IOERR_READ
 	}
-	var fileSize sqlite3.Sqlite3_int64
-	if rc := sqlcipherCallFileSize(tls, state.baseFile, uintptr(unsafe.Pointer(&fileSize))); rc != sqlite3.SQLITE_OK {
+	fileSize, rc := sqlcipherFileSizeOf(tls, state.baseFile)
+	if rc != sqlite3.SQLITE_OK {
 		return rc
 	}
 	pageSize := int64(state.pageSize)
@@ -441,8 +441,8 @@ func sqlcipherWriteRange(tls *libc.TLS, state *sqlcipherFileState, buf []byte, o
 	if err := state.ensureKeys(tls); err != nil {
 		return sqlite3.SQLITE_IOERR_WRITE
 	}
-	var fileSize sqlite3.Sqlite3_int64
-	if rc := sqlcipherCallFileSize(tls, state.baseFile, uintptr(unsafe.Pointer(&fileSize))); rc != sqlite3.SQLITE_OK {
+	fileSize, rc := sqlcipherFileSizeOf(tls, state.baseFile)
+	if rc != sqlite3.SQLITE_OK {
 		return rc
 	}
 	pageSize := int64(state.pageSize)
@@ -520,30 +520,26 @@ func (s *sqlcipherFileState) ensureKeys(tls *libc.TLS) error {
 		return nil
 	}
 	if !s.hasSalt {
-		var fileSize sqlite3.Sqlite3_int64
-		if rc := sqlcipherCallFileSize(tls, s.baseFile, uintptr(unsafe.Pointer(&fileSize))); rc != sqlite3.SQLITE_OK {
-			return errors.New("file size query failed")
+		fileSize, rc := sqlcipherFileSizeOf(tls, s.baseFile)
+		if rc != sqlite3.SQLITE_OK {
+			return fmt.Errorf("sqlcipher: file size query failed: rc=%d", rc)
 		}
 		if fileSize == 0 {
+			// New, empty file: choose a fresh salt; page 1 will carry it.
 			if _, err := rand.Read(s.salt[:]); err != nil {
 				return err
 			}
 			s.hasSalt = true
 		} else {
+			// Existing file: the salt must come from its first bytes. Never
+			// invent or rewrite a salt here: that would make an existing
+			// database permanently undecryptable.
 			buf := make([]byte, sqlcipherSaltSize)
-			rc := sqlcipherCallRead(tls, s.baseFile, buf, 0)
-			if rc == sqlite3.SQLITE_OK && len(buf) == sqlcipherSaltSize {
-				copy(s.salt[:], buf)
-				s.hasSalt = true
-			} else {
-				if _, err := rand.Read(s.salt[:]); err != nil {
-					return err
-				}
-				s.hasSalt = true
-				_, _ = rand.Read(buf)
-				copy(buf, s.salt[:])
-				_ = sqlcipherCallWrite(tls, s.baseFile, buf, 0)
+			if rc := sqlcipherCallRead(tls, s.baseFile, buf, 0); rc != sqlite3.SQLITE_OK {
+				return fmt.Errorf("sqlcipher: cannot read salt from existing file (size %d): rc=%d", fileSize, rc)
 			}
+			copy(s.salt[:], buf)
+			s.hasSalt = true
 		}
 	}
 	encKey, hmacKey := sqlcipherDeriveKeys(s.config, s.salt[:])
@@ -653,20 +649,45 @@ func sqlcipherAllZero(data []byte) bool {
 	return true
 }
 
+// Invariant for every sqlcipherCall* helper: libc code only ever receives
+// addresses of C memory (tls.Alloc), never of Go memory. A Go address passed as
+// uintptr is invisible to the runtime: the GC may move the goroutine stack
+// (stack shrinking can happen mid-call) or free an unreferenced heap slice while
+// libc is still using it. That corrupted pages intermittently and surfaced as
+// "file is not a database (26)" / "disk I/O error" (djtool-bha). Data is copied
+// between Go buffers and the C staging area instead.
+
 func sqlcipherCallRead(tls *libc.TLS, pFile uintptr, buf []byte, offset int64) int32 {
 	if len(buf) == 0 {
 		return sqlite3.SQLITE_OK
 	}
-	raw := (*libc.RawMem)(unsafe.Pointer(&buf[0]))[:len(buf)]
-	return (*(*func(*libc.TLS, uintptr, uintptr, int32, sqlite3.Sqlite3_int64) int32)(unsafe.Pointer(&struct{ uintptr }{(*sqlite3.Tsqlite3_io_methods)(unsafe.Pointer((*sqlite3.Tsqlite3_file)(unsafe.Pointer(pFile)).FpMethods)).FxRead})))(tls, pFile, uintptr(unsafe.Pointer(&raw[0])), int32(len(buf)), sqlite3.Sqlite3_int64(offset))
+	cbuf := tls.Alloc(len(buf))
+	defer tls.Free(len(buf))
+	rc := (*(*func(*libc.TLS, uintptr, uintptr, int32, sqlite3.Sqlite3_int64) int32)(unsafe.Pointer(&struct{ uintptr }{(*sqlite3.Tsqlite3_io_methods)(unsafe.Pointer((*sqlite3.Tsqlite3_file)(unsafe.Pointer(pFile)).FpMethods)).FxRead})))(tls, pFile, cbuf, int32(len(buf)), sqlite3.Sqlite3_int64(offset))
+	// Copy even on SQLITE_IOERR_SHORT_READ: the VFS zero-fills the unread tail.
+	copy(buf, unsafe.Slice((*byte)(unsafe.Pointer(cbuf)), len(buf)))
+	return rc
 }
 
 func sqlcipherCallWrite(tls *libc.TLS, pFile uintptr, buf []byte, offset int64) int32 {
 	if len(buf) == 0 {
 		return sqlite3.SQLITE_OK
 	}
-	raw := (*libc.RawMem)(unsafe.Pointer(&buf[0]))[:len(buf)]
-	return (*(*func(*libc.TLS, uintptr, uintptr, int32, sqlite3.Sqlite3_int64) int32)(unsafe.Pointer(&struct{ uintptr }{(*sqlite3.Tsqlite3_io_methods)(unsafe.Pointer((*sqlite3.Tsqlite3_file)(unsafe.Pointer(pFile)).FpMethods)).FxWrite})))(tls, pFile, uintptr(unsafe.Pointer(&raw[0])), int32(len(buf)), sqlite3.Sqlite3_int64(offset))
+	cbuf := tls.Alloc(len(buf))
+	defer tls.Free(len(buf))
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(cbuf)), len(buf)), buf)
+	return (*(*func(*libc.TLS, uintptr, uintptr, int32, sqlite3.Sqlite3_int64) int32)(unsafe.Pointer(&struct{ uintptr }{(*sqlite3.Tsqlite3_io_methods)(unsafe.Pointer((*sqlite3.Tsqlite3_file)(unsafe.Pointer(pFile)).FpMethods)).FxWrite})))(tls, pFile, cbuf, int32(len(buf)), sqlite3.Sqlite3_int64(offset))
+}
+
+// sqlcipherFileSizeOf returns the size of the underlying file. The out-param
+// lives in C memory; see the invariant above.
+func sqlcipherFileSizeOf(tls *libc.TLS, pFile uintptr) (sqlite3.Sqlite3_int64, int32) {
+	const n = int(unsafe.Sizeof(sqlite3.Sqlite3_int64(0)))
+	pSize := tls.Alloc(n)
+	defer tls.Free(n)
+	*(*sqlite3.Sqlite3_int64)(unsafe.Pointer(pSize)) = 0
+	rc := sqlcipherCallFileSize(tls, pFile, pSize)
+	return *(*sqlite3.Sqlite3_int64)(unsafe.Pointer(pSize)), rc
 }
 
 func sqlcipherCallClose(tls *libc.TLS, pFile uintptr) int32 {
